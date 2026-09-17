@@ -38,8 +38,12 @@ def main():
         parser.error("此操作需要 --thread")
     if args.action == "fork" and (not args.checkpoint or not args.report):
         parser.error("fork 需要 --checkpoint 和 --report")
+    # 每次新 run 分配独立 thread_id；恢复、历史和分支必须显式指定已有 thread。
+    # Each new run gets a distinct thread_id; resume, history, and fork require an existing thread.
     thread = args.thread or str(uuid4())
     config = {"configurable": {"thread_id": thread}, "recursion_limit": 40}
+    # SQLite checkpointer 在进程退出后仍保存状态，因此可用第二次 CLI 调用恢复。
+    # SQLite checkpoints survive process exit, so a later CLI invocation can resume work.
     Path(args.db).parent.mkdir(parents=True, exist_ok=True)
     with SqliteSaver.from_conn_string(args.db) as saver:
         graph = build_graph(saver, InMemoryStore(), args.real_model)
@@ -52,6 +56,8 @@ def main():
             dump({"values": snapshot.values, "next": snapshot.next, "tasks": snapshot.tasks})
             return
         if args.action == "history":
+            # history 返回不可变 checkpoint 快照，供检查与后续时间旅行使用。
+            # history returns immutable checkpoint snapshots for inspection and time travel.
             for item in graph.get_state_history(config):
                 dump(
                     {
@@ -66,6 +72,8 @@ def main():
         if args.action == "resume" and not any(t.interrupts for t in snapshot.tasks):
             parser.error("此 thread 没有等待恢复的 interrupt")
         if args.action == "fork":
+            # 指定旧 checkpoint 后更新 report；这会创建新历史分支，而不修改旧快照。
+            # Select an old checkpoint then update report; this creates a new branch without mutation.
             config["configurable"]["checkpoint_id"] = args.checkpoint
             if not graph.get_state(config).values:
                 parser.error("checkpoint 不存在")
@@ -73,12 +81,17 @@ def main():
             payload = None
             print("已从历史 checkpoint 创建新分支，原历史保留")
         elif args.action == "resume":
+            # Command(resume=...) 将人工决策送回上次 interrupt 的调用位置。
+            # Command(resume=...) sends the human decision back to the interrupted call site.
             payload = Command(resume={"approved": not args.reject})
         else:
             payload = initial_state(args.question)
         # Context 不在 checkpoint 中持久化，恢复时显式重新提供。
+        # Context is not checkpointed, so provide it again when resuming.
         context = Context(human_review=args.review or args.action == "resume")
         if args.stream:
+            # subgraphs=True 将研究子图的命名空间事件也写入流，便于观察嵌套执行。
+            # subgraphs=True includes namespaced events from research subgraphs in the stream.
             for event in graph.stream(
                 payload, config, context=context, stream_mode=args.stream, subgraphs=True
             ):
